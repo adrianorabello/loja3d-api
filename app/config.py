@@ -33,6 +33,11 @@ class Settings(BaseSettings):
 
     MONGODB_URL: str = "mongodb://127.0.0.1:27017"
     MONGODB_DB_NAME: str = "clara_rosa_store"
+    CHAT_ENABLED: bool = False
+    CHAT_REDIS_URL: str = "redis://127.0.0.1:6380/0"
+    CHAT_WS_ORIGINS: List[str] = ["http://localhost:4201"]
+    CHAT_SCANNER_HOST: str = "127.0.0.1"
+    CHAT_SCANNER_PORT: int = 3311
 
     JWT_SECRET_KEY: str = "clara-rosa-dev-secret-key-change-in-production-long-random-string"
     JWT_ALGORITHM: str = "HS256"

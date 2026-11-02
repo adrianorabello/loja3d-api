@@ -1,0 +1,31 @@
+services:
+  mongo:
+    image: mongo:7.0
+    command: ["mongod", "--replSet", "chat-rs", "--bind_ip_all", "--port", "27018"]
+    ports: ["127.0.0.1:27018:27018"]
+    volumes: [chat_mongo:/data/db]
+    healthcheck:
+      test: ["CMD", "mongosh", "--port", "27018", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+  mongo-init:
+    image: mongo:7.0
+    depends_on:
+      mongo: {condition: service_healthy}
+    network_mode: service:mongo
+    entrypoint: ["mongosh", "--port", "27018", "--quiet", "--eval"]
+    command: ["try { rs.status() } catch (e) { rs.initiate({_id:'chat-rs',members:[{_id:0,host:'localhost:27018'}]}) }"]
+    restart: "no"
+  redis:
+    image: redis:7-alpine
+    ports: ["127.0.0.1:6380:6379"]
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+  scanner:
+    image: clamav/clamav:stable
+    platform: linux/amd64
+    ports: ["127.0.0.1:3311:3310"]
+    volumes: [chat_clamav:/var/lib/clamav]
+volumes:
+  chat_mongo:
+  chat_clamav:

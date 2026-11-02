@@ -1,8 +1,14 @@
 from datetime import datetime, timezone
+import logging
+from uuid import uuid4
+from bson import Binary
 from typing import Any, Dict
 from pymongo.errors import DuplicateKeyError
 from pydantic import ValidationError
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, File, HTTPException, Request, Response, UploadFile, status
+from starlette.concurrency import run_in_threadpool
+from pymongo import ReturnDocument
+from pymongo.errors import PyMongoError
 from app.core.dependencies import format_user_document, get_current_user
 from app.core.phone import normalize_phone
 from app.core.rate_limit import rate_limit
@@ -11,10 +17,71 @@ from app.database import get_database
 from app.models.user import EmailChangeRequest, MessageResponse, TokenRequest, UserProfileUpdate, UserResponse
 from app.services.email import send_email
 from app.services.tokens import consume_token, create_token
+from app.services.avatar import MAX_AVATAR_BYTES, normalize_avatar
 from app.config import settings
 from datetime import timedelta
 
 router = APIRouter(tags=["Users & Profile"])
+logger = logging.getLogger("loja3d.profile")
+
+
+@router.post("/users/me/avatar", response_model=UserResponse,
+             dependencies=[Depends(rate_limit("avatar-upload", 10, 60))])
+async def upload_my_avatar(
+    file: UploadFile = File(...),
+    current_user: Dict[str, Any] = Depends(get_current_user),
+    db=Depends(get_database),
+):
+    try:
+        data = await file.read(MAX_AVATAR_BYTES + 1)
+    finally:
+        await file.close()
+    normalized = await run_in_threadpool(normalize_avatar, data, file.content_type or "")
+    try:
+        user = await db.users.find_one_and_update(
+            {"_id": current_user["_id"]},
+            {"$set": {"avatar_data": Binary(normalized), "avatar_version": uuid4().hex,
+                      "avatar": None, "updated_at": datetime.now(timezone.utc)}},
+            projection={"avatar_data": 0}, return_document=ReturnDocument.AFTER,
+        )
+    except PyMongoError as exc:
+        logger.exception("Avatar persistence failed for user %s", current_user["_id"])
+        raise HTTPException(503, detail="Could not save the photo. Please try again.") from exc
+    if user is None:
+        raise HTTPException(404, detail="User not found.")
+    return format_user_document(user)
+
+
+@router.get("/users/me/avatar")
+async def get_my_avatar(
+    current_user: Dict[str, Any] = Depends(get_current_user),
+    db=Depends(get_database),
+):
+    user = await db.users.find_one({"_id": current_user["_id"]}, {"avatar_data": 1})
+    if not user or not user.get("avatar_data"):
+        raise HTTPException(404, detail="No profile photo.")
+    return Response(bytes(user["avatar_data"]), media_type="image/jpeg",
+                    headers={"Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff"})
+
+
+@router.delete("/users/me/avatar", response_model=UserResponse)
+async def remove_my_avatar(
+    current_user: Dict[str, Any] = Depends(get_current_user),
+    db=Depends(get_database),
+):
+    try:
+        user = await db.users.find_one_and_update(
+            {"_id": current_user["_id"]},
+            {"$unset": {"avatar_data": "", "avatar_version": ""},
+             "$set": {"avatar": None, "updated_at": datetime.now(timezone.utc)}},
+            projection={"avatar_data": 0}, return_document=ReturnDocument.AFTER,
+        )
+    except PyMongoError as exc:
+        logger.exception("Avatar removal failed for user %s", current_user["_id"])
+        raise HTTPException(503, detail="Could not remove the photo. Please try again.") from exc
+    if user is None:
+        raise HTTPException(404, detail="User not found.")
+    return format_user_document(user)
 
 
 @router.get("/users/me", response_model=UserResponse)
@@ -37,11 +104,13 @@ async def update_my_profile(
     Strictly forbids role elevation and sensitive field modification.
     """
     raw_body = await request.json()
+    if not isinstance(raw_body, dict) or not isinstance(raw_body.get("user", raw_body), dict):
+        raise HTTPException(422, detail=[{"loc": ["body"], "msg": "Expected a profile object."}])
     user_data = raw_body.get("user", raw_body)
     try:
         payload = UserProfileUpdate(**user_data)
     except ValidationError as exc:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=[{"msg": e["msg"], "loc": e["loc"]} for e in exc.errors()])
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=[{"msg": e["msg"], "loc": ["body", *e["loc"]]} for e in exc.errors()])
 
     update_fields: Dict[str, Any] = {}
 
@@ -60,7 +129,7 @@ async def update_my_profile(
             try:
                 phone, country = normalize_phone(payload.phone, payload.phoneCountry)
             except ValueError as exc:
-                raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
+                raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=[{"loc": ["body", "phone"], "msg": str(exc)}])
             update_fields["phone"], update_fields["phone_country"] = phone, country
         else:
             update_fields["phone"], update_fields["phone_country"] = None, None
@@ -78,7 +147,7 @@ async def update_my_profile(
         {"$set": update_fields}
     )
 
-    updated_user = await db.users.find_one({"_id": current_user["_id"]})
+    updated_user = await db.users.find_one({"_id": current_user["_id"]}, {"avatar_data": 0})
     return format_user_document(updated_user)
 
 

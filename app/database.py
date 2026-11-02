@@ -22,6 +22,19 @@ async def get_database() -> AsyncIOMotorDatabase:
 
 async def init_indexes(db: AsyncIOMotorDatabase) -> None:
     """Create essential unique and search indexes for all collections."""
+    # Request references and paginated ownership/status scans are core invariants;
+    # fail startup rather than silently serving requests without these indexes.
+    await db.print_requests.create_index(
+        [("reference", 1)], unique=True, name="idx_print_requests_reference_unique"
+    )
+    await db.print_requests.create_index(
+        [("owner_id", 1), ("created_at", -1), ("_id", -1)],
+        name="idx_print_requests_owner_created",
+    )
+    await db.print_requests.create_index(
+        [("status", 1), ("created_at", -1), ("_id", -1)],
+        name="idx_print_requests_status_created",
+    )
     try:
         # Users
         await db.users.create_index([("email", 1)], unique=True, name="idx_users_email_unique")

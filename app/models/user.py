@@ -35,6 +35,7 @@ class UserResponse(BaseModel):
     phoneCountry: Optional[str] = None
     emailVerified: bool = False
     avatar: Optional[str] = None
+    avatarVersion: Optional[str] = None
     status: Optional[str] = "online"
     addresses: List[UserAddress] = Field(default_factory=list)
 
@@ -106,6 +107,11 @@ class UserProfileUpdate(BaseModel):
     phone: Optional[str] = Field(None, max_length=40)
     phoneCountry: Optional[str] = Field(None, min_length=2, max_length=2)
     addresses: Optional[List[UserAddress]] = None
+
+    @field_validator("name", mode="before")
+    @classmethod
+    def _trim_name(cls, value):
+        return value.strip() if isinstance(value, str) else value
 
     @field_validator("dateOfBirth")
     @classmethod

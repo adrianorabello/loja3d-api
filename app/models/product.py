@@ -1,6 +1,16 @@
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
+from bson import ObjectId
+from bson.errors import InvalidId
 from pydantic import BaseModel, ConfigDict, Field
+
+
+def get_product_query(id_or_slug: str) -> Dict[str, Any]:
+    try:
+        oid = ObjectId(id_or_slug)
+        return {"$or": [{"id": id_or_slug}, {"_id": oid}]}
+    except InvalidId:
+        return {"$or": [{"id": id_or_slug}, {"_id": id_or_slug}]}
 
 
 class ProductColor(BaseModel):

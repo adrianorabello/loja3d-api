@@ -135,7 +135,7 @@ async def sign_in(payload: SignInRequest, db=Depends(get_database)):
     """Authenticate with email and password and return access and refresh tokens."""
     normalized_email = payload.email.strip().lower()
 
-    user = await db.users.find_one({"email": normalized_email})
+    user = await db.users.find_one({"email": normalized_email}, {"avatar_data": 0})
     if not user or not verify_password(payload.password, user.get("password_hash", "")):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -200,7 +200,7 @@ async def refresh_tokens(payload: RefreshTokenRequest, db=Depends(get_database))
             "expires_at": {"$gt": now}
         })
         if stored_token:
-            user = await db.users.find_one({"_id": stored_token["user_id"]})
+            user = await db.users.find_one({"_id": stored_token["user_id"]}, {"avatar_data": 0})
             # Rotate: revoke used refresh token
             await db.refresh_tokens.update_one(
                 {"_id": stored_token["_id"]},
@@ -212,9 +212,9 @@ async def refresh_tokens(payload: RefreshTokenRequest, db=Depends(get_database))
         decoded = decode_access_token(payload.access_token)
         if decoded and decoded.get("sub"):
             try:
-                user = await db.users.find_one({"_id": ObjectId(decoded["sub"])})
+                user = await db.users.find_one({"_id": ObjectId(decoded["sub"])}, {"avatar_data": 0})
             except Exception:
-                user = await db.users.find_one({"_id": decoded["sub"]})
+                user = await db.users.find_one({"_id": decoded["sub"]}, {"avatar_data": 0})
 
     if not user or not user.get("is_active", True):
         raise HTTPException(

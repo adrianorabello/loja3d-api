@@ -2,6 +2,70 @@
 
 API REST assíncrona desenvolvida com Python, FastAPI e MongoDB.
 
+## Support chat (opt-in)
+
+Persistent customer/admin support, REST + WebSocket, transactional MongoDB
+history/outbox and private scanned GridFS attachments are available behind
+`CHAT_ENABLED`. See [chat setup and contracts](docs/chat.md). The separate
+`docker-compose.chat.yml` keeps the existing store database untouched.
+
+## Personal profile and avatar
+
+`GET/PATCH /api/v1/users/me` reads/updates only the authenticated user's profile.
+The legacy `/api/common/user` and `{user: ...}` shape remain supported.
+Editable fields are name (2-100 after trimming), phone/phoneCountry, dateOfBirth
+and addresses. A changed email is rejected: use the existing email-change
+confirmation endpoints. Roles, IDs, status and arbitrary avatar fields cannot
+be changed through profile PATCH.
+
+- `POST /api/v1/users/me/avatar`: Bearer-authenticated multipart, field `file`;
+  JPEG/PNG, 1 byte to 10 MiB, at most 16 million pixels, no animation. Uses Pillow
+  to decode and normalize to JPEG up to 512 x 512 and 512 KiB, with EXIF orientation
+  applied and metadata removed. Returns `UserResponse` including `avatarVersion`.
+- `GET /api/v1/users/me/avatar?v=<version>`: returns only the caller's stored JPEG,
+  `Cache-Control: private, no-store`, and `X-Content-Type-Options: nosniff`.
+  Version is a client cache key, not authorization. Without a photo returns 404.
+- `DELETE /api/v1/users/me/avatar`: clears bytes/version, returns `avatar: null`.
+
+Bytes are stored as BSON binary in the user's MongoDB document and excluded from
+ordinary profile/login/refresh responses and authentication reads. Replacement is
+atomic; invalid input or storage failure leaves the previous photo unchanged.
+No local filesystem volume or public image URL is required. Upload errors use
+413 (size), 415 (type), 422 (invalid image), 429 (rate limit), 503 (write failure).
+Configure the deployment's request-body limit to allow this bounded multipart
+upload; the application reads at most 10 MiB + 1 byte from the uploaded file.
+There is no endpoint accepting an arbitrary user ID for these operations.
+
+## Product image persistence
+
+Product create/update accepts the existing `images` array. New JPEG/PNG data URLs
+are decoded, validated and stored as BSON binary in `products.image_data`, with
+`id`, `content_type` and `data` per image. The `images` array stores only endpoint
+references for these uploads. Data URLs are transport/preview only, not the
+persisted format for new uploads. The original validated image bytes/resolution
+are preserved, including PNG transparency.
+
+The per-file limit remains 2 MiB (not the profile's 10 MiB), with at most
+16 million pixels and no animation. The full product document must fit MongoDB's
+16 MiB limit; exceeding it returns 413 before writing. Invalid content returns
+415/422, and database write failures return 503 without claiming success.
+Product fields and image bytes are saved atomically in one document. Replacing,
+removing or deleting the product removes the corresponding stored bytes.
+
+`GET /api/v1/products/{productId}/images/{imageId}` serves the stored bytes with the
+validated MIME type, `nosniff` and a one-hour public cache. Product photos are
+public media, including photos referenced by inactive products; inactive products
+remain excluded from the public catalogue. Photo IDs are random and replaced for
+new uploads. Removed URLs return 404 from the API, but already cached copies may
+remain until their cache expires. Admin writes still require the ADMIN role.
+
+Catalogue and admin JSON responses exclude the binary fields. Existing static
+asset paths and external HTTP(S) URLs remain references; they are not downloaded.
+Existing inline Base64 images convert on the next product save (including edits
+without changing `images`). There is no automatic bulk rewrite of existing data.
+Configure deployment request-body limits for Base64 transport overhead (~33%) and
+multiple images; the old JSON create/edit contracts remain compatible.
+
 ## Requisitos
 
 - Python 3.9 ou superior
@@ -69,6 +133,31 @@ SMTP_STARTTLS=true
 
 Substitua os valores entre `<...>` pelos dados reais. Não use uma URI local como `mongodb://127.0.0.1:27017` na Vercel: esse endereço aponta para o próprio ambiente da função, não para seu computador nem para um cluster acessível. A aplicação conecta ao MongoDB durante o arranque; uma URI ausente, inválida ou inacessível faz o arranque falhar.
 
+Para a loja Printoy publicada, configure no projeto **da API** na Vercel, no
+ambiente **Production**, e faça um novo deploy do backend:
+
+```text
+FRONTEND_URL=https://www.printoy3d.com
+CORS_ORIGINS=https://www.printoy3d.com,https://printoy3d.com
+```
+
+`www.printoy3d.com` e `printoy3d.com` são origens diferentes. Alterar o `.env`
+local ou publicar apenas o frontend não modifica a configuração da API remota.
+Não use `*` como atalho: autorize explicitamente os domínios da loja.
+Para verificar sem criar uma conta:
+
+```bash
+curl -i -X OPTIONS https://api.printoy3d.com/api/auth/sign-up \
+  -H 'Origin: https://www.printoy3d.com' \
+  -H 'Access-Control-Request-Method: POST' \
+  -H 'Access-Control-Request-Headers: content-type'
+```
+
+O resultado esperado é HTTP 200 e
+`access-control-allow-origin: https://www.printoy3d.com`. HTTP 400 com
+`Disallowed CORS origin` impede o cadastro pelo navegador, mesmo que o Postman
+consiga chamar a API; Postman e curl não aplicam a política CORS do navegador.
+
 O ponto de entrada ASGI da aplicação é `main.py`, com o objeto `app`. Configure o diretório raiz do projeto Vercel como `loja3d-api` se este estiver dentro de um monorepo. Este projeto não inclui atualmente um arquivo `vercel.json`; confirme nos logs da implantação se a Vercel detectou e construiu a função Python corretamente.
 
 ## MongoDB local com Docker Compose
@@ -108,6 +197,35 @@ No Windows, ative o ambiente virtual com `.venv\Scripts\activate`. A API precisa
 - Health check: <http://localhost:8000/health>
 - Rotas versionadas: prefixo `/api/v1`
 
+## Pedidos de impressão personalizada
+
+O backend persiste pedidos, revisões de orçamento e histórico visível ao cliente
+em MongoDB. O contrato completo e a matriz de transições por ator estão em
+[docs/print-requests.md](docs/print-requests.md).
+
+- Cliente: `POST /api/v1/print-requests`, `GET /api/v1/print-requests`,
+  `GET /api/v1/print-requests/{id}`, `POST .../{id}/messages` e
+  `POST .../{id}/actions`.
+- Administrador: `GET /api/v1/admin/print-requests`, `GET .../{id}`,
+  `POST .../{id}/messages`, `POST .../{id}/quote` e `POST .../{id}/transition`.
+- Criar e executar mutações pelas rotas do cliente exige papel `CUSTOMER`.
+  As leituras pessoais também aceitam `ADMIN`, mas continuam limitadas ao
+  proprietário; gerir pedidos de terceiros exige as rotas administrativas.
+- Listagens usam `{items,total,page,pageSize}`, com paginação, pesquisa, filtro
+  de estado e ordenação no servidor. Todas as mutações exigem `version`; uma
+  versão obsoleta ou transição inválida devolve `409`. Outro proprietário recebe
+  `404`, sem revelar a existência do pedido.
+- `allowedActions` e `allowedTransitions` são calculados pelo servidor.
+  Datas/histórico/orçamentos usam UTC; campos opcionais não definidos são
+  omitidos, não enviados como `null`.
+- O pagamento é confirmado **manualmente por um administrador**, com motivo no
+  histórico. Não há gateway, comprovativo, cobrança, notificação de pedidos ou
+  reembolso automático. O cancelamento administrativo após pagamento não
+  representa reembolso.
+- São aceites apenas `referenceLinks` HTTP(S), sem credenciais: até cinco URLs.
+  São referências externas, sem download/fetch pelo servidor e sem uploads
+  binários. O envio do pedido não cobra o cliente.
+
 ## Inicialização e dados de demonstração
 
 No arranque, a API conecta-se ao MongoDB, inicializa índices e executa o bootstrap configurado. Com as opções padrão, uma base vazia recebe um administrador inicial e dados de catálogo de demonstração.
@@ -120,6 +238,26 @@ As credenciais de exemplo (`admin@clararosa.pt` / `admin` e `cliente@clararosa.p
 source .venv/bin/activate
 pytest -v
 ```
+
+Os testes Python usam exclusivamente o MongoDB local
+`mongodb://127.0.0.1:27017` e a base `clara_rosa_test_store`, que é eliminada no
+fim da sessão. O `conftest.py` substitui a URI, a base e o backend de e-mail
+(`console`) antes de carregar a configuração; não utiliza o MongoDB nem o SMTP
+de produção do `.env`. Os testes do fluxo personalizado estão em
+`tests/test_print_requests.py`.
+
+### Testes automatizados no Postman
+
+Importe a [coleção de testes](postman/Printoy3D.postman_collection.json) e o
+[ambiente remoto](postman/Printoy3D.production.postman_environment.json).
+A variável `baseUrl` já aponta para `https://api.printoy3d.com`; também há um
+[ambiente local](postman/Printoy3D.local.postman_environment.json).
+
+Por segurança, `allowWrites=false` executa apenas as leituras públicas e os
+testes de acesso negado. O fluxo completo requer `allowWrites=true` e
+credenciais administrativas; cria contas, envia e-mails e testa o CRUD de
+produtos. Consulte as [instruções de execução e automatização](postman/README.md)
+antes de habilitá-lo, especialmente no ambiente de produção.
 
 ## Funcionalidades de conta e autenticação
 

@@ -3,8 +3,11 @@ import pytest
 from httpx import AsyncClient, ASGITransport
 from motor.motor_asyncio import AsyncIOMotorClient
 
-# Use test database
+# Never inherit a production MongoDB target or email provider from .env.
+os.environ["MONGODB_URL"] = "mongodb://127.0.0.1:27017"
 os.environ["MONGODB_DB_NAME"] = "clara_rosa_test_store"
+os.environ["EMAIL_BACKEND"] = "console"
+os.environ["ENVIRONMENT"] = "development"
 os.environ["BOOTSTRAP_ADMIN_ENABLED"] = "true"
 os.environ["ADMIN_INITIAL_EMAIL"] = "admin@clararosa.pt"
 os.environ["ADMIN_INITIAL_PASSWORD"] = "admin123"
@@ -32,6 +35,7 @@ async def clean_collections():
     if db_manager.db is not None:
         await db_manager.db.products.delete_many({})
         await db_manager.db.categories.delete_many({})
+        await db_manager.db.print_requests.delete_many({})
         await db_manager.db.refresh_tokens.delete_many({})
         await db_manager.db.auth_tokens.delete_many({})
         # delete non-admin test users

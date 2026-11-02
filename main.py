@@ -3,10 +3,18 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.utils import get_openapi
+from fastapi import Request
+from fastapi.responses import JSONResponse
+from pymongo.errors import PyMongoError
+from redis.exceptions import RedisError
 from app.config import settings
 from app.core.bootstrap import bootstrap_admin
+from app.core.chat_body_limit import ChatBodyLimitMiddleware
 from app.database import close_mongo_connection, connect_to_mongo, get_database
-from app.routers import admin_products, auth, categories, common, health, products, users
+from app.routers import admin_products, auth, categories, common, health, print_requests, products, users
+from app.routers import chat
+from app.services.chat import init_chat
+from app.services.chat_realtime import redis_client
 
 logging.basicConfig(
     level=logging.INFO,
@@ -22,6 +30,10 @@ async def lifespan(app: FastAPI):
     await connect_to_mongo()
     db = await get_database()
     await bootstrap_admin(db)
+    if settings.CHAT_ENABLED:
+        await init_chat(db)
+        async with redis_client() as redis:
+            await redis.ping()
     yield
     logger.info("Shutting down Clara Rosa Webstore API...")
     await close_mongo_connection()
@@ -39,6 +51,7 @@ app = FastAPI(
 
 # CORS Configuration
 origins = settings.CORS_ORIGINS if isinstance(settings.CORS_ORIGINS, list) else [str(settings.CORS_ORIGINS)]
+app.add_middleware(ChatBodyLimitMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
@@ -85,6 +98,18 @@ app.include_router(users.router, prefix=settings.API_V1_STR)
 app.include_router(categories.router, prefix=settings.API_V1_STR)
 app.include_router(products.router, prefix=settings.API_V1_STR)
 app.include_router(admin_products.router, prefix=settings.API_V1_STR)
+app.include_router(print_requests.customer_router, prefix=settings.API_V1_STR)
+app.include_router(print_requests.admin_router, prefix=settings.API_V1_STR)
+app.include_router(chat.router, prefix=settings.API_V1_STR)
+
+
+@app.exception_handler(RedisError)
+@app.exception_handler(PyMongoError)
+async def chat_infrastructure_error(request: Request, exc):
+    if not request.url.path.startswith(settings.API_V1_STR + "/chat"):
+        raise exc
+    logger.error("Chat infrastructure failure: %s", type(exc).__name__)
+    return JSONResponse(status_code=503, content={"detail": "Support infrastructure unavailable. Please retry."})
 
 # Legacy compatibility routes for direct frontend mock substitution:
 # 1. /api/auth/...

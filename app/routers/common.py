@@ -1,5 +1,6 @@
 from typing import Any, Dict, List
 from fastapi import APIRouter
+from app.config import settings
 
 router = APIRouter(prefix="/common", tags=["Common UI Data"])
 
@@ -28,6 +29,14 @@ ADMIN_NAVIGATION: List[Dict[str, Any]] = [
         ]
     },
     {
+        "id": "admin.print-requests",
+        "title": "Pedidos personalizados",
+        "type": "basic",
+        "icon": "heroicons_outline:clipboard-list",
+        "link": "/admin/requests",
+        "meta": {"roles": ["ADMIN"]}
+    },
+    {
         "id": "admin.divider",
         "type": "divider",
         "meta": {"roles": ["ADMIN"]}
@@ -46,12 +55,14 @@ ADMIN_NAVIGATION: List[Dict[str, Any]] = [
 @router.get("/navigation")
 async def get_navigation():
     """Return navigation structures required by the admin shell layout."""
-    return {
-        "default": ADMIN_NAVIGATION,
-        "compact": ADMIN_NAVIGATION,
-        "futuristic": ADMIN_NAVIGATION,
-        "horizontal": ADMIN_NAVIGATION
-    }
+    navigation = list(ADMIN_NAVIGATION)
+    if settings.CHAT_ENABLED:
+        navigation.insert(2, {
+            "id": "admin.chat", "title": "Atendimento", "type": "basic",
+            "icon": "heroicons_outline:chat-alt-2", "link": "/admin/chat",
+            "meta": {"roles": ["ADMIN"]}
+        })
+    return {key: navigation for key in ("default", "compact", "futuristic", "horizontal")}
 
 
 @router.get("/messages")

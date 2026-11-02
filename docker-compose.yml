@@ -3,6 +3,7 @@ services:
     image: mongo:7.0
     container_name: clara-rosa-mongodb
     restart: unless-stopped
+    command: ["mongod", "--replSet", "store-rs", "--bind_ip_all"]
     ports:
       - "27017:27017"
     environment:
@@ -15,6 +16,16 @@ services:
       timeout: 5s
       retries: 5
       start_period: 5s
+
+  mongodb-init:
+    image: mongo:7.0
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    network_mode: service:mongodb
+    entrypoint: ["mongosh", "--quiet", "--eval"]
+    command: ["try { rs.status() } catch (e) { rs.initiate({_id:'store-rs',members:[{_id:0,host:'localhost:27017'}]}) }"]
+    restart: "no"
 
   # Interface web opcional para visualizar coleções e documentos do MongoDB
   mongo-express:

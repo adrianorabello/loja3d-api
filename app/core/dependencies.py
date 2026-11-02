@@ -35,7 +35,8 @@ def format_user_document(doc: Dict[str, Any]) -> UserResponse:
         phone=doc.get("phone"),
         phoneCountry=doc.get("phone_country"),
         emailVerified=bool(doc.get("email_verified", False)),
-        avatar=doc.get("avatar"),
+        avatar=f"api/v1/users/me/avatar?v={doc['avatar_version']}" if doc.get("avatar_version") else doc.get("avatar"),
+        avatarVersion=doc.get("avatar_version"),
         status=doc.get("status", "online"),
         addresses=addresses
     )
@@ -75,7 +76,7 @@ async def get_current_user(
     except Exception:
         user_query = {"_id": user_id}
 
-    user = await db.users.find_one(user_query)
+    user = await db.users.find_one(user_query, {"avatar_data": 0})
     if not user:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

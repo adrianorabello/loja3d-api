@@ -1,8 +1,11 @@
 from datetime import datetime, timezone
+import logging
 import secrets
 from typing import Any, Dict, List, Optional
 from bson import ObjectId
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from starlette.concurrency import run_in_threadpool
+from pymongo.errors import PyMongoError
 from app.core.dependencies import require_role
 from app.database import get_database
 from app.models.product import (
@@ -10,21 +13,15 @@ from app.models.product import (
     ProductResponse,
     ProductUpdate,
     format_product_document,
+    get_product_query,
 )
 from app.models.user import UserRole
+from app.services.product_images import prepare_product_images, validate_product_document
 
 router = APIRouter(tags=["Admin Products"])
+logger = logging.getLogger("loja3d.products")
 
 admin_required = require_role([UserRole.ADMIN])
-
-
-def get_product_query(id_or_slug: str) -> Dict[str, Any]:
-    """Build a MongoDB query that matches either a custom string id, an ObjectId, or a slug."""
-    try:
-        oid = ObjectId(id_or_slug)
-        return {"$or": [{"id": id_or_slug}, {"_id": oid}]}
-    except Exception:
-        return {"$or": [{"id": id_or_slug}, {"_id": id_or_slug}]}
 
 
 # -----------------------------------------------------------------------------------------------------
@@ -33,7 +30,7 @@ def get_product_query(id_or_slug: str) -> Dict[str, Any]:
 @router.get("/admin/products", response_model=List[ProductResponse], dependencies=[Depends(admin_required)])
 async def get_all_products_admin(db=Depends(get_database)):
     """Fetch every product in the database (both active and inactive) for the admin table."""
-    cursor = db.products.find({}).sort("created_at", -1)
+    cursor = db.products.find({}, {"image_data": 0}).sort("created_at", -1)
     docs = await cursor.to_list(length=500)
     return [format_product_document(doc) for doc in docs]
 
@@ -46,7 +43,7 @@ async def get_all_products_admin(db=Depends(get_database)):
 async def get_product_by_id(id: str, db=Depends(get_database)):
     """Fetch a single product by its unique ID for editing."""
     query = get_product_query(id)
-    doc = await db.products.find_one(query)
+    doc = await db.products.find_one(query, {"image_data": 0})
     if not doc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -93,6 +90,7 @@ async def create_product(
     custom_id = f"prd-{secrets.token_hex(4)}"
 
     doc = {
+        "_id": ObjectId(),
         "id": custom_id,
         "slug": slug_normalized,
         "name": payload.name,
@@ -111,7 +109,13 @@ async def create_product(
         "updated_at": now
     }
 
-    result = await db.products.insert_one(doc)
+    doc.update(await run_in_threadpool(prepare_product_images, payload.images, custom_id, {}))
+    validate_product_document(doc)
+    try:
+        result = await db.products.insert_one(doc)
+    except PyMongoError as exc:
+        logger.exception("Could not create product %s", custom_id)
+        raise HTTPException(503, detail="Could not save the product. Please try again.") from exc
     doc["_id"] = result.inserted_id
 
     return format_product_document(doc)
@@ -172,8 +176,12 @@ async def update_product(
         update_fields["dimensions"] = payload.dimensions.model_dump()
     if payload.colors is not None:
         update_fields["colors"] = [c.model_dump() for c in payload.colors]
-    if payload.images is not None:
-        update_fields["images"] = payload.images
+    # Saving also converts legacy inline images, preserving their order and external references.
+    if payload.images is not None or any(value.startswith("data:") for value in existing.get("images", [])):
+        update_fields.update(await run_in_threadpool(
+            prepare_product_images, payload.images if payload.images is not None else existing.get("images", []),
+            str(existing.get("id") or existing["_id"]), existing,
+        ))
     if payload.stock is not None:
         update_fields["stock"] = payload.stock
     if payload.active is not None:
@@ -184,13 +192,18 @@ async def update_product(
         update_fields["featured"] = payload.featured
 
     update_fields["updated_at"] = datetime.now(timezone.utc)
+    validate_product_document({**existing, **update_fields})
 
-    await db.products.update_one(
-        {"_id": existing["_id"]},
-        {"$set": update_fields}
-    )
+    try:
+        await db.products.update_one(
+            {"_id": existing["_id"]},
+            {"$set": update_fields}
+        )
+    except PyMongoError as exc:
+        logger.exception("Could not save product %s", target_id)
+        raise HTTPException(503, detail="Could not save the product. Please try again.") from exc
 
-    updated_doc = await db.products.find_one({"_id": existing["_id"]})
+    updated_doc = await db.products.find_one({"_id": existing["_id"]}, {"image_data": 0})
     return format_product_document(updated_doc)
 
 
