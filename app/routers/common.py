@@ -17,6 +17,7 @@ ADMIN_NAVIGATION: List[Dict[str, Any]] = [
                 "title": "Lista de produtos",
                 "type": "basic",
                 "link": "/admin/products",
+                "exactMatch": True,
                 "meta": {"roles": ["ADMIN"]}
             },
             {
